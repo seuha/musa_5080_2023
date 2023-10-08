@@ -5,7 +5,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-
+rm=list
 # You can set some global options for knitting chunks
 
 knitr::opts_chunk$set(echo = TRUE)

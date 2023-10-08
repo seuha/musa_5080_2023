@@ -20,10 +20,9 @@ This .rmd document will then be the basis for you to "knit" your own Markdown HT
 
 Set up the Markdown parameters and load your libraries. If you don't have any of the following 
 
-```{r setup, include=FALSE}
+```{r setup, warning = FALSE, message = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 options(scipen=999)
-
 
 library(tidyverse)
 library(tidycensus)
@@ -52,7 +51,7 @@ source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-L
 ## Load Census API Key
 
 ```{r load_api_key, message=FALSE, warning=FALSE}
-census_api_key("YOUR API KEY", overwrite = TRUE)
+census_api_key("10633c9166fb86d7953da91f4ad8d215d0a432be", overwrite = TRUE)
 ```
 
 # Load the data
@@ -146,6 +145,7 @@ ggplot() +
   scale_fill_manual(values = c("#F8766D", "#00BFC4")) + 
   labs(title = "1/8mi buffer inside & outside UGA") +
   mapTheme()
+
 ```
 
 # Join the Town info to the buffers
@@ -170,3 +170,26 @@ Consider how you might label objects in your map using
 Think about ways to manipulate the `studyAreaTowns` data inside that text geom to make it more legible.
 
 Put all this code into a markdown chunk that runs correctly and allows this markdown to `knit`. Then see if you can manipulate the chunk options so that there aren't annoying warnings and other messages you don't want showing up in an assignment.
+
+```{r first_maps}
+ggplot()+
+  geom_sf(data = buffersAndTowns, aes(fill = MUNI))+
+  mapTheme()
+```
+
+
+```{r first_maps}
+ggplot()+
+  geom_sf(data = outsideBuffer, aes(fill = Legend))+
+  geom_sf(data = insideBuffer, aes(fill = Legend))+
+  geom_sf(data = studyAreaTowns, aes(fill = MUNI))+
+  scale_fill_viridis_c() +
+  geom_sf(data = uga, fill = "transparent")+
+  labs(title = "1/8mi Buffer Inside & Outside UGA by Municipality") +
+ 
+  mapTheme()
+
+```
+
+
+

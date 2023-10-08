@@ -1,0 +1,261 @@
+---
+title: "MUSA 508 Midterm"
+author: "Alice Han"
+date: "2023-10-01"
+editor_options: 
+  chunk_output_type: inline
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: "hide"
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list=ls())
+
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(ggcorrplot) # plot correlation plot
+library(corrr)      # another way to plot correlation plot
+library(kableExtra)
+library(jtools)     # for regression model plots
+library(ggstance) # to support jtools plots
+library(ggpubr)    # plotting R^2 value on ggplot point scatter
+library(broom.mixed) # needed for effects plots
+
+library(walkscoreAPI) # to pull walkscore
+library(tidygeocoder) # to pull coordinates
+library(rmarkdown)
+library(RColorBrewer)
+library(ggpubr)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+# functions and data directory
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#25CB10", "#5AB60C", "#8FA108",   "#C48C04", "#FA7800")
+```
+
+
+Pull in Philly housing prediction data
+```{r read_data}
+
+# pull in housing prediction data
+phila <- 
+  st_read("https://raw.githubusercontent.com/mafichman/musa_5080_2023/main/Midterm/data/2023/studentData.geojson") %>%
+  st_transform('ESRI:102286')
+
+# create variable with complete address
+phila$address_complete <- paste(phila$location, ", Philadelphia, PA", sep="") 
+
+```
+
+### ACS Data
+Pull in ACS data with 5 year estimates from census tract data for 2019
+```{r load_key, warning = FALSE, eval = FALSE}
+
+readRenviron("~/.Renviron")
+
+```
+
+```{r get_acs, cache = TRUE}
+
+acs_variable_list.2019 <- load_variables(2019, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+```
+
+
+Pull the variable data for our 3 chosen indicators: Population Density, Median Income, Median Rent.
+```{r define_tracts, cache = TRUE, collapse = TRUE}
+
+# pull polygon and variables
+tracts19 <- get_acs(geography = "tract",
+                    variables = c(TotalPop = "B25026_001E",
+                                  MedHHInc = "B19013_001E",
+                                  MedRent = "B25058_001E"),
+                    year = 2019,
+                    state = "PA",
+                    county= 101,
+                    geometry = TRUE,
+                    output = "wide") %>%
+            st_transform('ESRI:102728') %>%
+            dplyr::select(-starts_with("B"))
+
+# parse out tract number       
+tracts19$tract = word(tracts19$NAME,3)
+tracts19$tract <- gsub(",","",tracts19$tract)
+
+# filter by tracts only present in the phila dataset
+# str(tracts19$tract) # check data type
+# str(phila$census_tract)
+
+tracts19$tract <- as.numeric(tracts19$tract) # convert to numbers
+
+# tracts19 <- tracts19 %>% filter(tract %in% phila$census_tract)
+
+# calculate tract area using st_area (sqft)
+tracts19$area = tracts19 %>% st_area()
+
+# calculate population density
+tracts19 <- tracts19 %>% mutate(PopDen = ifelse(TotalPop > 0, (TotalPop/area ),0))
+
+
+# check; pull tigris data for tract area ALAND; yes numbers are similar enough
+# tracts19_tigris <- tigris::tracts(state = "PA", county = "Philadelphia", class = "sf")
+
+# append ALAND to tract19 
+# tracts19$area <- tracts19_tigris$ALAND[match(tracts19$tract,tracts19_tigris$NAME)]
+
+```
+
+```{r append_acs_var_to_phila}
+
+# add pop density, med income, med rent to the Philly housing price dataset
+
+# replicate and clean up dataset; remove unneeded or mostly blank columns
+# phila2 <- phila %>%
+#             dplyr::select(-cross_reference, -date_exterior_condition, 
+#                           -mailing_address_2, -mailing_care_of, -mailing_city_state, -mailing_street, -mailing_zip,
+#                           -number_of_rooms, -other_building, 
+#                           -owner_1, -owner_2, -street_name, -suffix,
+#                           -unfinished, -utility) 
+
+# remove rows where property has 0 value
+# this is challenge data so put it back in
+# phila2 <- filter(phila2, sale_price != 0)
+
+# append variables to phila2 by using the census tract number as the unique identifier
+phila$PopDen <- tracts19$PopDen[match(phila$census_tract, tracts19$tract)]
+phila$MedHHInc <- tracts19$MedHHInc[match(phila$census_tract, tracts19$tract)]
+phila$MedRent <- tracts19$MedRent[match(phila$census_tract, tracts19$tract)]
+
+# check nas
+  # summary(phila)
+  # summary(tracts19)
+  # nas for 7260 entries - bc we dont have tract data
+# for every na, calculate the median for the variable and replace na with that value; create separate column with original na for reference (1 = NA, 0 = if otherwise)
+
+phila$PopDen_is_na <- ifelse(is.na(phila$PopDen), 1, 0)
+phila$PopDen <- ifelse(is.na(phila$PopDen), median(phila$PopDen, na.rm = TRUE), phila$PopDen)
+median(phila$PopDen, na.rm = TRUE)
+# summary(phila$PopDen); check the summary is the same
+
+phila$MedHHInc_is_na <- ifelse(is.na(phila$MedHHInc), 1, 0)
+phila$MedHHInc <- ifelse(is.na(phila$MedHHInc), median(phila$MedHHInc,na.rm = TRUE), phila$MedHHInc)
+
+
+phila$MedRent_is_na <- ifelse(is.na(phila$MedRent), 1, 0)
+phila$MedRent <- ifelse(is.na(phila$MedRent), median(phila$MedRent, na.rm = TRUE), phila$MedRent)
+
+```
+
+### SEPTA DATA
+```{r load_septa, cache = TRUE}
+el <- st_read("https://opendata.arcgis.com/datasets/8c6e2575c8ad46eb887e6bb35825e1a6_0.geojson")
+Broad_St <- st_read("https://opendata.arcgis.com/datasets/2e9037fd5bef406488ffe5bb67d21312_0.geojson")
+
+# bind the two lines to create one dataframe 
+septaStops <- 
+  rbind(
+     el %>% 
+      mutate(Line = "El") %>%
+      dplyr::select(Station, Line),
+     Broad_St %>%
+      mutate(Line ="Broad_St") %>%
+      dplyr::select(Station, Line)) %>%
+  st_transform(st_crs(tracts19)) 
+
+```
+
+```{r buffer, cache = TRUE}
+
+# establish 0.5 mile distance from station as the buffer radius
+buffer <- st_union(st_buffer(septaStops, 2640)) %>%
+      st_sf()
+```
+
+
+```{r centroid, cache = TRUE}
+
+# if centroid of tract intersects the 0.5 mile buffer, the properties in the tract is within that buffer
+selectCentroids <-
+  st_centroid(tracts19)[buffer,] %>%
+    st_drop_geometry() %>%
+    left_join(dplyr::select(tracts19, GEOID), by = "GEOID") %>%
+    st_sf() %>%
+    dplyr::select(TotalPop) %>%
+    mutate(Selection_Type = "Select by Centroids")
+
+```
+
+```{r MRB, cache = TRUE}
+# assign each property price to the appropriate buffer from septa
+
+metro_MRB <- multipleRingBuffer(st_union(septaStops), 47520, 2640) #47520 provides 9 mile distance?
+
+# calculate median property sale price
+
+MedSP = phila2 %>% group_by(census_tract)  %>%
+                    summarise(median_sp = median(sale_price), 
+                              .groups = 'drop')
+
+# append median property sale price to tracts 19
+
+tracts19$median_sp <- MedSP$median_sp[match(tracts19$tract, MedSP$census_tract)]
+
+
+# assign median_sp to each buffer from SEPTA stop
+# too many NAs; dont have data for decimal point tracts
+st_join(st_centroid(dplyr::select(tracts19, GEOID)),
+          metro_MRB) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(tracts19, GEOID, median_sp), 
+            by=c("GEOID"="GEOID")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+
+# how to map distance to subway stations map in the textbook??
+```
+
+```{r dist, cache = TRUE}
+
+# previously was rent as a function of distance to subway stations
+# here we want property value as a function of distance to subway stations?
+# calculate distance from the nearest septa stop
+
+rent_buffer = st_join(metro_MRB, st_centroid(drop_na(allTracts, MedRent)), left=TRUE) %>%
+                            group_by(distance, year) %>%
+                            summarize(mean_rent=mean(MedRent)) %>%
+                            st_drop_geometry() %>%
+                            mutate(mean_rent_inf = ifelse(year == "2009", 
+                                                          mean_rent * 1.09, mean_rent)) %>%
+                            select(distance, year, mean_rent_inf)
+
+
+```
+
+```{r get_acs, cache = TRUE}
+
+
+```
+
+```{r get_acs, cache = TRUE}
+
+sum(is.na(tracts19$tract))
+```

@@ -1,0 +1,459 @@
+---
+title: "MUSA 508 Assignment 2"
+author: "Alice Han, with Akira DiSandro and Russell Richie"
+date: "2023-09-22"
+output: 
+  html_document:
+    code_folding: hide
+
+---
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+This analysis was conducted to explore the potential behind Transit Oriented Development (TOD) in Washington, D.C.. 4 indicators were chosen to compare between 2009 and 2019 census tract data: Total Population (in occupied housing units, Median Rent, Median Household Income, and Education (percentage of population holding a Bachelor's degree). Rent and Income variables were adjusted for inflation.
+
+# Data Wrangling
+
+### Load packages and functions
+
+```{r setup2, include=FALSE}
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(gridExtra)
+library(grid)
+library(kableExtra)
+library(rmarkdown)
+library(RColorBrewer)
+library(ggpubr)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+
+test<- brewer.pal(5, "PuBu")
+test
+
+palette1 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+palette2 <- c("#FEEBE2", "#FBB4B9", "#F768A1", "#C51B8A", "#7A0177")
+palette3 <- c("#FEEDDE", "#FDBE85", "#FD8D3C", "#E6550D", "#A63603")
+palette4 <- c("#F6EFF7", "#BDC9E1", "#67A9CF", "#1C9099", "#016C59")
+palette5 <- c("#F1EEF6", "#BDC9E1", "#74A9CF", "#2B8CBE", "#045A8D")
+```
+
+
+### Load census tract for 2009 and 2019
+
+Load the census key to prepare for census tract pull.
+```{r load_key, warning = FALSE, eval = FALSE}
+readRenviron("~/.Renviron")
+```
+
+Pull the census tract data for 2009 and 2019, with 5 year ACS estimates.
+```{r get_acs, cache = TRUE}
+
+acs_variable_list.2009 <- load_variables(2009, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+
+acs_variable_list.2019 <- load_variables(2019, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+```
+
+
+Pull the variable data for our 4 chosen indicators: Population, Median Income, Rent, and Education. As bachelor attainnees is separated by sex, the Education variable is created by summing the two measures.
+```{r define_tracts, cache = TRUE, collapse = TRUE}
+
+tracts09 <- get_acs(geography = "tract",
+                    variables = c("B25026_001E","B15001_050E",
+                                  "B15001_009E","B19013_001E",
+                                  "B25058_001E"),
+                    year = 2009,
+                    state = 11,
+                    geometry = TRUE,
+                    output = "wide") %>%
+            st_transform('ESRI:102728') %>%
+            rename(TotalPop = B25026_001E, 
+                   FemaleBachelors = B15001_050E, 
+                   MaleBachelors = B15001_009E,
+                   MedHHInc = B19013_001E, 
+                   MedRent = B25058_001E) %>%
+            mutate(pctBachelors = ifelse(TotalPop > 0, #Showing education as percentage of population
+                                         ((FemaleBachelors + MaleBachelors)
+                                          / TotalPop),0), year = "2009") %>%
+            dplyr::select(-FemaleBachelors, -MaleBachelors, 
+                          -NAME, -starts_with("B") )
+  
+
+tracts19 <- get_acs(geography = "tract",
+                    variables = c("B25026_001E","B15001_050E",
+                                  "B15001_009E","B19013_001E",
+                                  "B25058_001E"),
+                    year = 2019,
+                    state = 11,
+                    geometry = TRUE,
+                    output = "wide") %>%
+            st_transform('ESRI:102728') %>%
+            rename(TotalPop = B25026_001E, 
+                   FemaleBachelors = B15001_050E, 
+                   MaleBachelors = B15001_009E,
+                   MedHHInc = B19013_001E, 
+                   MedRent = B25058_001E) %>%
+            mutate(pctBachelors = ifelse(TotalPop > 0,
+                                         ((FemaleBachelors + MaleBachelors)
+                                          / TotalPop),0), year = "2019") %>%
+            dplyr::select(-FemaleBachelors, -MaleBachelors, 
+                          -NAME, -starts_with("B") )
+
+```
+The two tracts are combined to create a complete time and space dataset.
+
+```{r alltracts}
+allTracts <- rbind(tracts09,tracts19)
+```
+
+
+## Wrangling Transit Open Data
+
+### Pulling data
+The dataset for DC metro stops and lines are pulled from OpenData.
+
+```{r load_dc_data, collapse = TRUE}
+dc_metro <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/52/query?outFields=*&where=1%3D1&f=geojson")
+
+dc_lines <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/106/query?outFields=*&where=1%3D1&f=geojson")
+```
+
+The dataset is cleaned and manipulated to determine metro stops and their lines. As 1 stop can have multiple lines intersect through it, the same stop is duplicated for each line.
+
+```{r dc_metro2} 
+
+#Duplicate stops per line
+dc_metro2 <- dc_metro %>% select(NAME,LINE,geometry) %>% 
+    mutate(red = ifelse(grepl("red",LINE),1,NA),
+          orange = ifelse(grepl("orange",LINE),1,NA),
+          yellow = ifelse(grepl("yellow|yllw",LINE),1,NA),
+          green = ifelse(grepl("green|grn",LINE),1,NA),
+          blue = ifelse(grepl("blue",LINE),1,NA),
+          silver = ifelse(grepl("silver|slvr",LINE),1,NA)) %>% 
+    select(-LINE) %>% 
+    pivot_longer(cols = red:silver, 
+                 names_to = "LINE",values_drop_na = T)%>% 
+    select(NAME,LINE,geometry) %>%
+    st_transform(st_crs(tracts19))
+
+#Clean up metro lines data
+dc_lines2 <- dc_lines %>% select(NAME, geometry)
+
+```
+
+
+The metro stops are plotted on the tracts to understand the transit availability throughout the city. Transit development is centered in the middle of the city. THe assumption is that TOD potential will be higher in those census tracts. If households value transit proximity, then the tracts closest to the transits would show a higher valuation. 
+```{r metrostops_ggplot}
+
+ggplot() + 
+  geom_sf(data=st_union(tracts19)) +
+  geom_sf(data=dc_metro2, 
+          aes(colour = LINE), 
+          show.legend = "point", size= 2) +
+  scale_color_manual(values = c("red" = "red",
+                                "orange" = "orange",
+                                "yellow" = "yellow",
+                                "green" = "green",
+                                "blue" = "blue",
+                                "silver" = "#999999")) +
+  labs(title="Metro Stops", 
+       subtitle="Washington, D.C.") +
+  mapTheme()
+
+```
+
+
+### Buffer
+
+We establish "closeness" to transit as 0.5 miles away from a transit stop. To visualize the relative distances on a map, polygon "buffers" are generated. The transit stop is denoted by the black circle, and the outer circle establishes the boundaries of the 0.5 miles away from the transit stop.
+
+```{r buffer}
+buffer <- st_union(st_buffer(dc_metro2, 2640)) %>%
+      st_sf()
+```
+
+```{r buffer_plot}
+ggplot() +
+  geom_sf(data=st_union(tracts19)) +
+  geom_sf(data=buffer) +
+  geom_sf(data=dc_metro2, show.legend = "point") +
+  mapTheme()
+```
+
+### Centroid Selection of Tracts
+
+There are three different approaches to selecting tracts. The clip approach is impractical, as our census data is provided per tract and cannot be attributed to a cookie cutter selection of the tract. The spatial selection approach is over inclusive, as it would include all tracts that touch the buffer, regardless of how much intersection is present. The centroid selection approach is the optimal one here. By determining whether the center of the tract intersects with the buffer zone, we assume that the buffer is capturing the tract is positioned appropriately enough within the buffer.
+
+
+```{r centroid, fig.show="hold"}
+
+selectCentroids <-
+  st_centroid(tracts19)[buffer,] %>%
+    st_drop_geometry() %>%
+    left_join(dplyr::select(tracts19, GEOID), by = "GEOID") %>%
+    st_sf() %>%
+    dplyr::select(TotalPop) %>%
+    mutate(Selection_Type = "Select by Centroids")
+
+```
+
+
+## TOD Indicator Maps
+
+The monetary variables median rent and median household income are adjusted for inflation to account for the monetary difference between 2009 and 2019. The inflation rate is assumed as $1 in 2009 to be $1.19 in 2019.
+
+```{r inflation}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2009", MedRent * 1.19, MedRent),
+         MedHHInc.inf = ifelse(year == "2009", MedHHInc * 1.19, MedHHInc))
+```
+The population map suggests that while population did increase in the center of DC, where many transit stops are located and converge, there seems to be more growth outside these areas nearer to the outskirts of the city.
+```{r varMaps_TotalPop}
+
+#Population
+ggplot(allTracts.group) +
+    geom_sf(data = st_union(tracts19)) +
+    geom_sf(aes(fill = q5(TotalPop))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red")+
+    scale_fill_manual(values = palette1,
+                      labels = qBr(allTracts.group, "TotalPop"),
+                      name = "Population\n(Quintile Breaks)") +
+    labs(title = "Total Population 2009-2019", 
+         subtitle = "Total Population in Occupied Housing Units; \n red circular borders denotes areas close to subway stations") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=15))
+
+```
+
+The median rent map suggests that rent prices have increased greatly near the transit stops, which supports the assumption that households value transit near areas more. However, a few key tracts with many transit stops are missing data and weakens this analysis.
+
+```{r varMaps_MedRent}
+
+#Median Rent
+ggplot(allTracts.group) +
+    geom_sf(data = st_union(tracts19)) +
+    geom_sf(aes(fill = q5(MedRent.inf))) +
+    geom_sf(data = buffer, fill = "transparent", color = "#15ff00")+
+    scale_fill_manual(values = palette2,
+                      labels = qBr(allTracts.group, "MedRent.inf"),
+                      name = "Rent\n(Quintile Breaks)") +
+    labs(title = "Median Rent 2009-2019", 
+         subtitle = "Real Dollars; green circular border denotes areas close to subway stations") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=15))
+
+```
+
+The education map suggests that overall education has increased. A few key tracts near the major transit stops show a significant increase in education levels. However, this may be because of missing data in the 2009 census tract.
+
+```{r varMaps_Bachelors}
+
+#Education
+ggplot(allTracts.group) +     
+  geom_sf(data = st_union(tracts19)) +
+    geom_sf(aes(fill = q5(pctBachelors))) +
+    geom_sf(data = buffer, fill = "transparent", color = "green")+
+    scale_fill_manual(values = palette3,
+                      labels = qBr(allTracts.group, "pctBachelors"),
+                      name = "Percent\n(Quintile Breaks)",
+                      scales::label_percent() ) +
+    labs(title = "Percent of Population with a \nBachelor's Degree 2009-2019", 
+         subtitle = "Green circular border denotes areas close to subway stations") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=15))
+
+```
+
+The median income map shows some increase near the center and northern transit stops but remain relatively similar for the southern transit stop areas. This suggests other factors are contributing to the rise of income.
+
+```{r varMaps_MedHHInc}
+ggplot(allTracts.group) +
+  geom_sf(data = st_union(tracts19)) +
+    geom_sf(aes(fill = q5(MedHHInc.inf))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red")+
+    scale_fill_manual(values = palette5,
+                      labels = qBr(allTracts.group, "MedHHInc.inf"),
+                      name = "Income\n(Quintile Breaks)") +
+    labs(title = "Median Household Income 2009-2019", 
+         subtitle = "Real Dollars; red circular border denotes areas close to subway stations") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=15))
+
+```
+
+## TOD Indicators
+
+The summary bar plot shows the differences between our chosen indicators over all the tracts in the D.C. area. Overall, total population, median household income, and median rent has increased for both TOD and non-TOD tracts. However, education has increased in non-TOD but decreased in TOD tracts. This could suggest a movement of bachelor attainees to non-TOD tracts, or that fewer people are completing bachelor degrees in the area.
+The summary table shows the differences in figures.
+
+```{r sum_bar}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent.inf, na.rm = T),
+            Population = mean(TotalPop, na.rm = T),
+            Percent_Bach = mean(pctBachelors, na.rm = T),
+            Income = mean(MedHHInc.inf, na.rm = T))
+
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  mutate(Variable = ifelse(Variable == "Percent_Bach","Bachelors",Variable),
+         Variable = factor(Variable, 
+                           levels = c("Population","Bachelors","Income","Rent"))) %>% 
+  ggplot(aes(year, Value, fill = TOD)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    facet_wrap(~Variable, scales = "free", ncol=4) +
+    scale_fill_manual(values = c("#f0f9e8", "#045A8D")) +
+    labs(title = "Indicator differences across time and space") +
+    plotTheme() + theme(legend.position="bottom")
+```
+
+
+```{r sum_table}
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove = T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Value = round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kable() %>%
+  kable_styling() %>%
+  footnote(general_title = "\n")
+```
+
+
+## Graduated Symbol Maps
+
+The population and rent map shows substantial growth near center of the city, where the transit stops converge. This could suggest movement of higher income people towards these areas.
+```{r grad}
+
+#create ununioned buffer
+un_buffer <- st_buffer(dc_metro2, 2640) %>%
+  mutate(ID = seq_along(geometry))
+
+grad1 <- st_join(un_buffer, st_centroid(allTracts)) %>%
+  group_by(NAME, year) %>%
+  summarize(AggPop = sum(TotalPop, na.rm = T),
+            meanRent = mean(MedRent, na.rm = T)) %>%
+  st_drop_geometry() %>%
+  mutate(meanRentInf = ifelse(year == "2009", meanRent*1.19, meanRent)) %>%
+  select(-meanRent)
+
+# join grad1 and geometry from dc_metro 
+grad2 <- inner_join(dc_metro %>% select(NAME,geometry), grad1, by = "NAME")
+
+# create graduated symbol map
+# total pop
+ggplot() +
+  geom_sf(data = allTracts, fill = "#f0f9e8", color = "#7a6507") +
+  geom_sf(data = grad2 %>% select(-meanRentInf),
+          pch = 21,
+          aes(size = AggPop),
+          fill = alpha("#7A0177", 0.5),
+          color = "#7A0177") +
+  facet_wrap(~year) +
+  labs(title = "Population of tracts within .5 miles of each Metro Stop",
+       subtitle = "D.C.",
+       size = "Total Population") +
+  scale_size(range = c(0.5, 7)) +
+  mapTheme()
+
+# mean rent
+ggplot() +
+  geom_sf(data = allTracts, fill = "#f0f9e8", color = "#7a6507") +
+  geom_sf(data = grad2 %>% select(-AggPop),
+          pch = 21,
+          aes(size = meanRentInf),
+          fill = alpha("#7A0177", 0.5),
+          color = "#7A0177") +
+  facet_wrap(~year) +
+  labs(title = "Mean Rent of tracts within .5 miles of each Metro Stop",
+       subtitle = "D.C.; Adjusted for Inflation (2019)",
+       size = "Mean Rent") +
+  scale_size(range = c(0.5, 7)) +
+  mapTheme()
+
+```
+
+
+## Rent as function of distance to transit stop
+
+### Multipleringbuffer
+
+The multipleringbuffer function is used to assign rents to the appropriate buffer from the transit stop.
+```{r MRB, collapse = TRUE}
+metro_MRB <- multipleRingBuffer(st_union(dc_metro2), 47520, 2640)
+
+st_join(st_centroid(dplyr::select(allTracts, GEOID, year)),
+          metro_MRB) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+```
+
+The half mile buffers may be too large for D.C.'s smaller size. However, assuming people's relative sense of "closeness" to a transit stop as 0.5 miles is not affected by the city size, the buffer size is kept the same.
+
+We now determine which buffer belongs to which tract. Because multiple buffers will overlap with a tract, the smallest distance buffer is assigned to the tract.
+
+```{r MRB_plot}
+ggplot() +
+    geom_sf(data=metro_MRB) +
+    geom_sf(data=dc_metro2, size=1) +
+    geom_sf(data=st_union(tracts19), fill=NA, size=20) +
+    labs(title="Half mile buffers") +
+    mapTheme()
+```
+
+The graph suggests that D.C. residents may have an optimal sense of distance from a transit stop. Assuming rent prices reflect the valuation of people's appreciation of distance from the transit stop, the distance with the highest valuation could be considered people's preferred distance. Interestingly, the relationship is not linear. It could be there are bands of people - those who prefer to be closest, and the next band to be at a certain distance. This could reflect the needs of the occupation, or perhaps their income levels and ability to afford a card.
+```{r}
+
+rent_buffer = st_join(metro_MRB, st_centroid(drop_na(allTracts, MedRent)), left=TRUE) %>%
+                            group_by(distance, year) %>%
+                            summarize(mean_rent=mean(MedRent)) %>%
+                            st_drop_geometry() %>%
+                            mutate(mean_rent_inf = ifelse(year == "2009", 
+                                                          mean_rent * 1.09, mean_rent)) %>%
+                            select(distance, year, mean_rent_inf)
+
+ggplot(drop_na(rent_buffer),
+       aes(distance, mean_rent_inf, colour=year)) +
+  geom_point(size=3) + 
+  geom_line(size=2) +
+  labs(title="Rent as a function of distance to subway stations", 
+       subtitle = "D.C. census tracts", 
+       size = "Year", 
+       x = "Distance to Nearest Transit Stop (Miles)",
+       y = "Average Median Rent")
+  
+```
+
+
+
